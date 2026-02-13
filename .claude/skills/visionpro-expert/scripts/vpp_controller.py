@@ -3,15 +3,14 @@ import requests
 import sys
 import base64
 
-# The base URL of the VppDriver server you are running locally.
-SERVER_URL = "http://localhost:8000"
 
-def call_vpp_server(command, params={}):
+def call_vpp_server(command, params={}, port=8000):
     """
     Sends a command to the VppDriver HTTP server and prints the result.
     """
     try:
-        url = f"{SERVER_URL}/{command}"
+        server_url = f"http://localhost:{port}"
+        url = f"{server_url}/{command}"
         response = requests.get(url, params=params, timeout=10, proxies={"http": None, "https": None})
         response.raise_for_status()
         # To prevent encoding errors on Windows, write raw UTF-8 bytes directly to the stdout buffer.
@@ -32,6 +31,7 @@ def main():
         description="A lightweight HTTP client for the VppDriver server.",
         formatter_class=argparse.RawTextHelpFormatter
     )
+    parser.add_argument("--port", type=int, default=8000, help="The port number for the VppDriver server.")
     subparsers = parser.add_subparsers(dest="action", required=True)
 
     # API endpoints are now updated to match your C# server.
@@ -72,7 +72,7 @@ def main():
         encoded_code = base64.b64encode(args.code.encode('utf-8')).decode('ascii')
         params = {"tool": args.tool, "code": encoded_code}
 
-    call_vpp_server(args.action, params)
+    call_vpp_server(args.action, params, port=args.port)
 
 
 if __name__ == "__main__":
