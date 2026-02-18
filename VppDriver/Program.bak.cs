@@ -149,8 +149,6 @@ namespace VppDriverMcp
                     {
 
 
-                        string jsonResponse;
-
                         // 【关键】使用匿名对象构建响应，确保绝对没有 extra fields
                         if (responseError != null)
                         {
@@ -177,6 +175,9 @@ namespace VppDriverMcp
                         // 关键：写向真正的 stdout
                         _realStdout.WriteLine(jsonResponse);
                         _realStdout.Flush();
+
+                        Console.WriteLine(jsonResponse);
+                        Console.Out.Flush(); // 强制刷新
                     }
                 }
                 catch (Exception ex)
@@ -265,19 +266,6 @@ namespace VppDriverMcp
                         properties = new { tool_name = new { type = "string" } },
                         required = new [] { "tool_name" }
                     }
-                },
-                new {
-                    name = "vpp_create_tool",
-                    description = "Create a new VisionPro tool and add it to a parent tool (e.g., a CogToolGroup).",
-                    inputSchema = new {
-                        type = "object",
-                        properties = new {
-                            tool_type = new { type = "string", description = "The full type name of the tool to create (e.g., 'Cognex.VisionPro.Blob.CogBlobTool')" },
-                            tool_name = new { type = "string", description = "A unique name for the new tool" },
-                            parent_tool = new { type = "string", description = "The name of the parent tool to which this new tool will be added" }
-                        },
-                        required = new [] { "tool_type", "tool_name", "parent_tool" }
-                    }
                 }
             };
         }
@@ -340,13 +328,6 @@ namespace VppDriverMcp
 
                     case "vpp_find_code":
                         outputText = DeepSearchForCode(toolName);
-                        break;
-
-                    case "vpp_create_tool":
-                        string toolType = args?["tool_type"]?.ToString();
-                        string newToolName = args?["tool_name"]?.ToString();
-                        string parentToolName = args?["parent_tool"]?.ToString();
-                        outputText = HandleCreateTool(toolType, newToolName, parentToolName);
                         break;
 
                     default:
@@ -431,72 +412,6 @@ namespace VppDriverMcp
                 {
                     return $"Error setting value: {ex.Message}";
                 }
-            }
-        }
-
-        static string HandleCreateTool(string toolType, string newToolName, string parentToolName)
-        {
-            if (vppObject == null) return "Error: No VPP file loaded.";
-            if (string.IsNullOrEmpty(toolType) || string.IsNullOrEmpty(newToolName) || string.IsNullOrEmpty(parentToolName))
-                return "Error: tool_type, tool_name, and parent_tool are required.";
-
-            // 1. 检查父工具是否存在
-            object parentTool = FindToolByName(parentToolName);
-            if (parentTool == null) return $"Error: Parent tool '{parentToolName}' not found.";
-
-            // 2. 检查父工具是否是有效的容器 (ToolGroup 或 ToolBlock)
-            CogToolGroup parentGroup = null;
-            if (parentTool is CogToolGroup tg)
-            {
-                parentGroup = tg;
-            }
-            else if (parentTool is CogJob job && job.VisionTool is CogToolGroup jtg)
-            {
-                parentGroup = jtg;
-            }
-            else if (parentTool is CogToolBlock tb)
-            {
-                parentGroup = tb;
-            }
-
-            if (parentGroup == null)
-            {
-                return $"Error: Parent tool '{parentToolName}' is of type {parentTool.GetType().Name}, which cannot contain other tools.";
-            }
-
-            // 3. 检查新工具名称是否已存在
-            if (toolCache.ContainsKey(newToolName))
-            {
-                return $"Error: A tool named '{newToolName}' already exists.";
-            }
-
-            try
-            {
-                // 4. 创建工具实例 (关键步骤)
-                // 使用反射从字符串类型名动态创建对象
-                Type type = Type.GetType(toolType, true);
-                if (type == null || !typeof(ICogTool).IsAssignableFrom(type))
-                {
-                    return $"Error: '{toolType}' is not a valid or assignable tool type.";
-                }
-                ICogTool newTool = (ICogTool)Activator.CreateInstance(type);
-                newTool.Name = newToolName;
-
-                // 5. 将新工具添加到父容器中
-                parentGroup.Tools.Add(newTool);
-
-                // 6. 更新缓存并保存
-                toolCache.Add(newToolName, newTool);
-                CogSerializer.SaveObjectToFile(vppObject, vppPath);
-
-                Log($"[Success] Created tool '{newToolName}' of type '{toolType}' and added to '{parentToolName}'.");
-                return $"Successfully created and added tool '{newToolName}'.";
-            }
-            catch (Exception ex)
-            {
-                string errorMsg = $"Failed to create tool: {ex.Message}";
-                Log($"[Error] {errorMsg}");
-                return errorMsg;
             }
         }
 
@@ -822,22 +737,333 @@ namespace VppDriverMcp
             }
             else if (obj is CogToolGroup group)
             {
+                ausing Cognex.VisionPro;
+                using Cognex.VisionPro.QuickBuild;
+                using Cognex.VisionPro.ToolBlock;
+                using Cognex.VisionPro.ToolGroup;
+                using Newtonsoft.Json;
+                using Newtonsoft.Json.Linq;
+                using System;
+                using System.Collections;
+                using System.Collections.Generic;
+                using System.IO;
+                using System.Linq;
+                using System.Reflection;
+                using System.Text;
+
+namespace VppDriverMcp
+    {
+        class Program
+        {
+            // --- 全局状态 ---
+            private static readonly Dictionary<string, object> toolCache = new Dictionary<string, object>(StringComparer.OrdinalIgnoreCase);
+            private static object vppObject;
+            private static string vppPath;
+
+            // --- 日志与通信 ---
+            // 日志文件强制写在桌面，方便调试
+            private static string logFilePath = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Desktop), "vpp_mcp_debug.log");
+            private static StreamWriter _claudeChannel;
+
+            [STAThread] // VisionPro 必须
+            static void Main(string[] args)
+            {
+                try
+                {
+                    // 初始化日志
+                    File.WriteAllText(logFilePath, $"[Start] PID: {System.Diagnostics.Process.GetCurrentProcess().Id}\n");
+
+                    // 1. 强制无 BOM UTF-8
+                    Console.InputEncoding = new UTF8Encoding(false);
+                    Console.OutputEncoding = new UTF8Encoding(false);
+
+                    // 2. 建立给 Claude 的专用通道 (Stdout)
+                    var originalOut = Console.OpenStandardOutput();
+                    _claudeChannel = new StreamWriter(originalOut, new UTF8Encoding(false)) { AutoFlush = true, NewLine = "\n" };
+
+                    // 3. 把所有杂乱日志重定向到 Stderr (Claude 看到会忽略，不会报错)
+                    Console.SetOut(Console.Error);
+
+                    Log("[System] Initialized. Waiting for Claude...");
+
+                    // 如果启动参数带了路径，记录一下，但不立即加载（防止超时）
+                    if (args.Length > 0)
+                    {
+                        Log($"[Info] Pending file path: {args[0]}");
+                    }
+
+                    RunMcpLoop();
+                }
+                catch (Exception ex)
+                {
+                    Log($"[FATAL] {ex}");
+                }
+            }
+
+            static void RunMcpLoop()
+            {
+                var input = Console.OpenStandardInput();
+                var reader = new StreamReader(input, new UTF8Encoding(false));
+
+                while (true)
+                {
+                    try
+                    {
+                        string line = reader.ReadLine();
+                        if (line == null) break;
+                        if (string.IsNullOrWhiteSpace(line)) continue;
+
+                        Log($"[Received] {line}");
+
+                        var request = JsonConvert.DeserializeObject<JObject>(line);
+                        JObject response = new JObject();
+                        response["jsonrpc"] = "2.0";
+                        response["id"] = request["id"];
+
+                        string method = request["method"]?.ToString();
+
+                        // --- 处理请求 ---
+                        if (method == "initialize")
+                        {
+                            response["result"] = JObject.FromObject(new
+                            {
+                                protocolVersion = "2024-11-05",
+                                capabilities = new { tools = new { } },
+                                serverInfo = new { name = "visionpro-driver", version = "2.1.0" }
+                            });
+                        }
+                        else if (method == "tools/list")
+                        {
+                            // 【关键】这里返回真正的工具定义！
+                            response["result"] = new JObject { ["tools"] = JToken.FromObject(GetMcpTools()) };
+                        }
+                        else if (method == "tools/call")
+                        {
+                            // 执行具体逻辑
+                            var result = HandleToolCall(request["params"]);
+                            response["result"] = JToken.FromObject(result);
+                        }
+                        else if (method == "ping")
+                        {
+                            response["result"] = new JObject();
+                        }
+                        else
+                        {
+                            if (request["id"] == null) continue; // 通知不回
+                            response["result"] = new JObject();
+                        }
+
+                        // --- 发送响应 ---
+                        if (request["id"] != null)
+                        {
+                            string jsonString = response.ToString(Formatting.None);
+                            lock (_claudeChannel)
+                            {
+                                _claudeChannel.WriteLine(jsonString);
+                                _claudeChannel.Flush();
+                            }
+                            Log($"[Sent] {jsonString}");
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        Log($"[Loop Error] {ex.Message}");
+                    }
+                }
+            }
+
+            // --- MCP 工具定义 (Claude 会读取这里) ---
+            static List<object> GetMcpTools()
+            {
+                return new List<object>
+            {
+                new {
+                    name = "vpp_load_file",
+                    description = "Load a VisionPro .vpp file. You MUST call this tool first before accessing other tools.",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new { file_path = new { type = "string", description = "The absolute path to the .vpp file" } },
+                        required = new [] { "file_path" }
+                    }
+                },
+                new {
+                    name = "vpp_list_tools",
+                    description = "List all VisionPro tools contained in the currently loaded VPP file.",
+                    inputSchema = new { type = "object", properties = new { } }
+                },
+                new {
+                    name = "vpp_get_property",
+                    description = "Get a specific property value from a tool (e.g. RunParams.ContrastThreshold).",
+                    inputSchema = new {
+                        type = "object",
+                        properties = new {
+                            tool_name = new { type = "string", description = "The name of the tool (e.g. CogBlobTool1)" },
+                            path = new { type = "string", description = "Property path (e.g. RunParams.ContrastThreshold)" }
+                        },
+                        required = new [] { "tool_name" }
+                    }
+                }
+            };
+            }
+
+            static object HandleToolCall(JToken paramsToken)
+            {
+                string name = paramsToken["name"]?.ToString();
+                JObject args = paramsToken["arguments"] as JObject;
+                string outputText = "";
+                bool isError = false;
+
+                try
+                {
+                    if (name == "vpp_load_file")
+                    {
+                        string path = args?["file_path"]?.ToString();
+                        outputText = LoadVppFile(path);
+                    }
+                    else if (name == "vpp_list_tools")
+                    {
+                        if (toolCache.Count == 0) outputText = "No tools loaded. Please call 'vpp_load_file' first.";
+                        else outputText = string.Join("\n", toolCache.Keys.Select(k => $"{k} ({toolCache[k].GetType().Name})"));
+                    }
+                    else if (name == "vpp_get_property")
+                    {
+                        string tName = args?["tool_name"]?.ToString();
+                        string path = args?["path"]?.ToString();
+                        outputText = HandleGetProperty(tName, path);
+                    }
+                    else
+                    {
+                        outputText = $"Unknown tool: {name}";
+                        isError = true;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    isError = true;
+                    outputText = $"Error: {ex.Message}";
+                    Log($"[Tool Error] {ex}");
+                }
+
+                return new { content = new[] { new { type = "text", text = outputText } }, isError = isError };
+            }
+
+            // --- 业务逻辑 ---
+
+            static string LoadVppFile(string path)
+            {
+                if (!File.Exists(path)) return $"File not found: {path}";
+                try
+                {
+                    Log($"Loading VPP: {path}...");
+                    vppObject = CogSerializer.LoadObjectFromFile(path);
+                    vppPath = path;
+
+                    toolCache.Clear();
+                    Traverse(vppObject, (obj, tName) => {
+                        if (!toolCache.ContainsKey(tName)) toolCache[tName] = obj;
+                        return false;
+                    });
+
+                    string msg = $"Success. Loaded {toolCache.Count} tools from {path}.";
+                    Log(msg);
+                    return msg;
+                }
+                catch (Exception ex)
+                {
+                    return $"Failed to load: {ex.Message}";
+                }
+            }
+
+            static string HandleGetProperty(string toolName, string path)
+            {
+                if (!toolCache.TryGetValue(toolName, out object tool)) return "Tool not found.";
+                if (string.IsNullOrEmpty(path)) return tool.ToString();
+
+                if (TryResolveProperty(tool, path, out object target, out PropertyInfo prop))
+                {
+                    object val = prop != null ? prop.GetValue(target) : target;
+                    return val?.ToString() ?? "null";
+                }
+                return "Property path not found.";
+            }
+
+            static bool Traverse(object obj, Func<object, string, bool> action)
+            {
+                if (obj == null) return false;
+                string name = "Unnamed";
+                try
+                {
+                    if (obj is ICogTool ct) name = ct.Name;
+                    else if (obj is CogJob cj) name = cj.Name;
+                }
+                catch { }
+
+                if (action(obj, name)) return true;
+
+                if (obj is CogJobManager manager)
+                {
+                    for (int i = 0; i < manager.JobCount; i++) Traverse(manager.Job(i), action);
+                }
+                else if (obj is CogJob job)
+                {
+                    if (job.VisionTool != null) Traverse(job.VisionTool, action);
+                }
+                else if (obj is CogToolGroup group)
+                {
+                    if (group.Tools != null)
+                        foreach (ICogTool tool in group.Tools) Traverse(tool, action);
+                }
+                // 增加 ToolBlock 支持
+                else if (obj is CogToolBlock block)
+                {
+                    if (block.Tools != null)
+                        foreach (ICogTool tool in block.Tools) Traverse(tool, action);
+                }
+                return false;
+            }
+
+            static bool TryResolveProperty(object root, string path, out object targetObj, out PropertyInfo targetProp)
+            {
+                targetObj = root; targetProp = null;
+                string[] parts = path.Split('.');
+                object current = root;
+
+                foreach (var part in parts)
+                {
+                    if (current == null) return false;
+                    PropertyInfo p = current.GetType().GetProperty(part);
+                    if (p == null) return false;
+                    targetObj = current; targetProp = p;
+                    current = p.GetValue(current);
+                }
+                return true;
+            }
+
+            static void Log(string msg)
+            {
+                string time = DateTime.Now.ToString("HH:mm:ss.fff");
+                string fullMsg = $"{time} {msg}";
+                Console.WriteLine(fullMsg); // 写 Stderr
+                try { File.AppendAllText(logFilePath, fullMsg + "\n"); } catch { } // 写文件
+            }
+        }
+    }
                 if (group.Tools != null)
                     foreach (ICogTool tool in group.Tools)
                         if (Traverse(tool, action)) return true;
             }
             else if (obj is IEnumerable enumerable && !(obj is string))
-            {
-                foreach (var item in enumerable)
-                    if ((item is ICogTool || item is CogJob) && Traverse(item, action)) return true;
-            }
-            return false;
+{
+    foreach (var item in enumerable)
+        if ((item is ICogTool || item is CogJob) && Traverse(item, action)) return true;
+}
+return false;
         }
 
         static void Log(string message)
-        {
-            // 日志只写到 Stderr，绝不写到 Stdout，否则会破坏 MCP 协议
-            Console.Error.WriteLine(message);
-        }
+{
+    // 日志只写到 Stderr，绝不写到 Stdout，否则会破坏 MCP 协议
+    Console.Error.WriteLine(message);
+}
     }
 }

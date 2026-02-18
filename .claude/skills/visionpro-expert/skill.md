@@ -1,12 +1,12 @@
 ---
 name: visionpro-expert
-description: Industrial vision tuning expert for Cognex VisionPro. Uses an MCP-based C# driver (VppDriverMcp.exe) to analyze, diagnose, and modify .vpp files through deep property inspection and C# script manipulation.
+description: Industrial vision tuning expert for Cognex VisionPro. Uses an MCP-based C# driver (VppDriver.exe) to analyze, diagnose, and modify .vpp files through deep property inspection and C# script manipulation.
 ---
 
 # VisionPro Expert Skill
 
 ## 1. Purpose
-This skill transforms the agent into a specialized engineer for Cognex VisionPro. It interfaces with the `VppDriverMcp.exe` via the Model Context Protocol (MCP) to programmatically inspect tool properties, tune parameters, and modify C# scripts (ToolBlocks/Jobs) within `.vpp` files.
+This skill transforms the agent into a specialized engineer for Cognex VisionPro. It interfaces with the `VppDriver.exe` via the Model Context Protocol (MCP) to programmatically inspect tool properties, tune parameters, and modify C# scripts (ToolBlocks/Jobs) within `.vpp` files.
 
 ## 2. Core Principles
 
