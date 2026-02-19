@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(copy:*)"
+      "Bash(copy:*)",
+      "mcp__visionpro__vpp_get_property"
     ]
   }
 }
