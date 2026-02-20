@@ -2,7 +2,9 @@
   "permissions": {
     "allow": [
       "Bash(copy:*)",
-      "mcp__visionpro__vpp_get_property"
+      "mcp__visionpro__vpp_get_property",
+      "mcp__visionpro_walkthrough__kb_search",
+      "mcp__visionpro_walkthrough__kb_open"
     ]
   }
 }
